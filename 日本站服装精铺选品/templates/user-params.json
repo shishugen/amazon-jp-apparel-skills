@@ -1,0 +1,49 @@
+{
+  "_comment": "复制为 output/params.json 后按需修改。所有金额单位 JPY；费率用小数，0.10 = 10%。",
+  "market": "JP",
+  "currency": "JPY",
+  "mode": "full",
+  "price_min": 2000,
+  "price_max": 3000,
+  "monthly_sales_target": 50,
+  "monthly_sales_min_acceptable": 30,
+  "monthly_sales_max_reasonable": 100,
+  "min_net_profit_jpy": 500,
+  "first_order_qty": 100,
+  "competition": "low",
+  "_seasonality_note": "季节口径唯一开关：three_seasons_spring_summer_autumn=春夏秋3-11月（默认，排除冬季12/1/2月）；strict_year_round=全年12个月（最保守）；custom=自定义窗口，仅此时读取 season_window_months。旧值 stable/strict/flexible 自动回退全年。",
+  "seasonality": "three_seasons_spring_summer_autumn",
+  "season_window_months": [],
+  "gender": "all",
+  "categories": [],
+  "return_risk": "low",
+  "history_months": 24,
+  "min_months_for_seasonality": 6,
+  "low_review_max": 50,
+  "outlier_sales_max": 5000,
+  "costs": {
+    "purchase_cost_jpy": 700,
+    "inbound_shipping_jpy": 180,
+    "fba_fee_jpy": 380,
+    "referral_rate": 0.10,
+    "ad_cost_rate": 0.10,
+    "return_reserve_rate": 0.05,
+    "other_cost_jpy": 0,
+    "_note": "FBA 与佣金费率必须按 Amazon 日本站最新标准核对后再用于采购决策。"
+  },
+  "thresholds": {
+    "cv_excellent": 0.20,
+    "cv_acceptable": 0.30,
+    "cv_seasonal": 0.50,
+    "top10_concentration_high": 0.55,
+    "top10_concentration_medium": 0.40,
+    "grade_a_min": 80,
+    "grade_b_min": 70,
+    "grade_c_min": 60
+  },
+  "output": {
+    "top_n": 20,
+    "priority_n": 5,
+    "include_raw_in_html": true
+  }
+}
