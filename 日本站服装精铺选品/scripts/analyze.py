@@ -34,6 +34,7 @@ ALIASES = {
     "asin": ["asin", "商品asin", "父asin", "子asin", "父(子)体asin", "父体asin", "商品编号"],
     "title": ["商品", "商品名称", "标题", "title", "商品标题", "产品名称", "商品名"],
     "brand": ["品牌", "brand", "メーカー"],
+    "gender": ["性别", "gender", "性別"],
     "price": ["价格", "售价", "平均单价", "buybox价格", "price", "日元价格", "当前价格"],
     "monthly_sales": ["月销量", "销量", "月销量(件)", "sales", "monthly sales", "estimated monthly sales", "预估月销量"],
     "monthly_revenue": ["月销售额", "销售额", "revenue", "月销售金额"],
@@ -46,6 +47,11 @@ ALIASES = {
     "launch_date": ["上架时间", "上市时间", "上架日期", "launch date", "首次上架"],
     "seller_name": ["卖家名称", "卖家", "店铺", "店铺名", "seller", "seller name", "商家", "卖家店铺"],
     "seller_count": ["卖家数", "卖家数量", "seller count", "sellers"],
+    "seller_country": ["卖家所属地", "seller country", "seller location", "卖家所在地"],
+    "seller_info": ["卖家信息", "seller info", "商家信息"],
+    "fulfillment": ["配送方式", "fulfillment", "配送", "buybox类型", "buybox类型(配送)"],
+    "a_plus": ["a+页面", "a+", "a plus", "a+页面标记", "has a+"],
+    "video": ["视频介绍", "商品视频", "有视频", "video", "视频"],
     "variation": ["变体", "颜色", "尺码", "子体", "variation", "规格"],
     "month": ["月份", "月", "month", "date", "日期"],
     "keyword": ["关键词", "keyword", "搜索词", "キーワード"],
@@ -67,6 +73,53 @@ def safe_str(value) -> str:
     if value is None:
         return ""
     return unicodedata.normalize("NFKC", str(value)).strip()
+
+
+CHINA_SIGNALS = ["cn", "china", "中国", "中華人民共和国", "people's republic of china"]
+
+
+def is_china_seller(item: dict) -> bool | None:
+    """综合卖家所属地 + 卖家信息地址判断中国卖家；无信号返回 None(Unknown)，不猜测。"""
+    vals = [safe_str(item.get("seller_country")), safe_str(item.get("seller_info"))]
+    text = " ".join(vals).lower()
+    if any(s in text for s in CHINA_SIGNALS):
+        return True
+    # 明确是日本（JP / 日本 / 日本国）则判否；其余信号不足 → Unknown
+    jp = ["jp", "japan", "日本"]
+    if any(s in text for s in jp) and not any(s in text for s in CHINA_SIGNALS):
+        return False
+    return None
+
+
+def pass_seller_filters(item: dict, params: dict, gaps: list, market: str) -> bool:
+    """按卖家所属地（含中国卖家判断）/ 配送方式过滤；默认 all 全部放行。
+
+    卖家精灵 UI 里「是否为中国卖家」与「卖家所属地」是同一个筛选项（所属地输入框），
+    因此这里统一用 seller_country 一个参数，不再拆成两个独立开关。
+    """
+    country = str(params.get("seller_country", "all") or "all").strip().upper()
+    if country not in ("ALL", ""):
+        if country in ("CN", "CHINA", "中国"):
+            # 中国卖家：所属地字段常为空，用综合判断（所属地 + 卖家信息地址）
+            if item["is_china_seller"] is not True:
+                return False
+        elif country in ("JP", "JAPAN", "日本"):
+            if item["is_china_seller"] is not False:
+                return False
+        elif country == "UNKNOWN":
+            if item["seller_country"] not in ("", MISSING, "N/A"):
+                return False
+        elif item["seller_country"].upper() != country:
+            # 其他国家代码按所属地字段精确匹配
+            return False
+
+    fulfil = str(params.get("fulfillment", "all") or "all").strip().upper()
+    if fulfil not in ("ALL", ""):
+        # 卖家精灵 UI 为 AMZ / FBA / FBM 三个独立复选框，可多选（逗号分隔），精确匹配不做映射
+        allowed = {x.strip() for x in fulfil.split(",") if x.strip()}
+        if item["fulfillment"].upper() not in allowed:
+            return False
+    return True
 
 
 def num(value):
@@ -422,7 +475,11 @@ def grade_of(total, params):
 def seasonality_for_market(market, asin_to_market, keyword_to_market, asin_trends, keyword_trends, params):
     months_back = int(params.get("history_months", 24) or 24)
     relevant_asin = {r for r, m in asin_to_market.items() if m == market}
-    relevant_kw = {k for k, m in keyword_to_market.items() if m == market}
+    relevant_kw = set()
+    for k, m in keyword_to_market.items():
+        ms = m if isinstance(m, (list, tuple, set)) else [m]
+        if market in ms:
+            relevant_kw.add(k)
 
     asin_series = defaultdict(dict)
     for r in asin_trends:
@@ -443,6 +500,11 @@ def seasonality_for_market(market, asin_to_market, keyword_to_market, asin_trend
         v = num(r.get("search_volume"))
         if v is not None:
             kw_series[k][mo] = v
+
+    # 无专属数据（既无本市场ASIN销量，也无本市场关键词映射）→ 标数据不足
+    # 不允许回退到"全部关键词求和"：那会把无关品曲线混进来，制造虚假稳定(CV≈0.2)
+    if not asin_series and not relevant_kw:
+        return None
 
     source = "竞品逐月销量"
     series = defaultdict(float)
@@ -497,6 +559,123 @@ def seasonality_for_market(market, asin_to_market, keyword_to_market, asin_trend
     }
 
 
+def build_dashboard(comps: list, keywords: list, params: dict, ms: dict, new_def_months: int = 3) -> dict:
+    """市场概览看板数据。缺字段的指标标 available=False，不编造。
+
+    全部为「当前样本」口径，非日本站全市场。
+    """
+    from datetime import date
+    today = date.today()
+
+    def pct(n, d):
+        return round(n / d * 100, 2) if d else None
+
+    total_sales = sum(c["monthly_sales"] for c in comps if c["monthly_sales"] is not None)
+    total_rev = sum(
+        (c["monthly_revenue"] if c["monthly_revenue"] is not None
+         else (c["price"] or 0) * (c["monthly_sales"] or 0))
+        for c in comps
+    )
+
+    # 新品（上架 ≤ new_def_months 个月）
+    def age_months(c):
+        s = str(c.get("launch_date") or "")
+        m = re.search(r"(\d{4})[-/](\d{1,2})", s)
+        if not m:
+            return None
+        y, mo = int(m.group(1)), int(m.group(2))
+        if not 1 <= mo <= 12:
+            return None
+        return (today.year - y) * 12 + (today.month - mo)
+
+    new_items = [c for c in comps if (age_months(c) is not None and age_months(c) <= new_def_months)]
+    new_sales = sum(c["monthly_sales"] for c in new_items if c["monthly_sales"] is not None)
+    new_rev = sum(
+        (c["monthly_revenue"] if c["monthly_revenue"] is not None
+         else (c["price"] or 0) * (c["monthly_sales"] or 0))
+        for c in new_items
+    )
+
+    # 卖家所属地分布（按销量）
+    geo = {"中国": 0.0, "日本": 0.0, "其他/未知": 0.0}
+    for c in comps:
+        u = c["monthly_sales"] or 0
+        if c.get("is_china_seller") is True:
+            geo["中国"] += u
+        elif c.get("is_china_seller") is False:
+            geo["日本"] += u
+        else:
+            geo["其他/未知"] += u
+    geo_share = {k: pct(v, total_sales) for k, v in geo.items()}
+
+    # 配送方式分布（按销量）
+    ful = {"AMZ": 0.0, "FBA": 0.0, "FBM": 0.0, "未知": 0.0}
+    for c in comps:
+        u = c["monthly_sales"] or 0
+        f = str(c.get("fulfillment") or "").strip().upper()
+        ful[f if f in ful else "未知"] += u
+    ful_share = {k: pct(v, total_sales) for k, v in ful.items()}
+
+    # 搜索购买比
+    sv = sum((k.get("search_volume") or 0) for k in keywords)
+    pv = sum((k.get("purchase_volume") or 0) for k in keywords)
+
+    # 平均上架天数 / 平均评分数
+    ages = [(today - datetime.strptime(re.search(r"(\d{4})[-/](\d{1,2})", str(c.get("launch_date"))).group(0).replace("/", "-"), "%Y-%m").date()).days
+            for c in comps if c.get("launch_date") and re.search(r"(\d{4})[-/](\d{1,2})", str(c.get("launch_date")))]
+    ratings = [c["rating"] for c in comps if c["rating"] is not None]
+
+    # 头部商品集中度 CR-N 序列（商品/品牌/卖家），供"前N名"下拉联动
+    def cr_series(key_fn):
+        grouped = defaultdict(float)
+        for c in comps:
+            v = c.get("monthly_sales")
+            if v is not None:
+                grouped[key_fn(c)] += v
+        ordered = sorted(grouped.values(), reverse=True)
+        out = {}
+        for n in (3, 5, 10, 20):
+            out[f"cr{n}"] = round(sum(ordered[:n]) / total_sales, 4) if total_sales else None
+        return out
+
+    cr_product = cr_series(lambda c: c["asin"])
+    cr_brand = cr_series(lambda c: c["brand"])
+    cr_seller = cr_series(lambda c: c.get("seller") if c.get("seller") and c["seller"] != MISSING else c["asin"])
+
+    # A+ / 视频销量占比（有 A+ 或有视频的商品销量之和）
+    def has_flag(v):
+        s = safe_str(v).upper()
+        return s in ("Y", "YES", "TRUE", "1", "有", "A+", "有视频")
+    ap_sales = sum((c["monthly_sales"] or 0) for c in comps
+                   if has_flag(c.get("a_plus")) or has_flag(c.get("video")))
+    ap_available = any(safe_str(c.get("a_plus")) or safe_str(c.get("video")) for c in comps)
+
+    return {
+        "scope": "当前样本（非日本站全市场）",
+        "new_definition_months": new_def_months,
+        "metrics": {
+            "monthly_sales": {"value": round(total_sales, 2), "available": True, "label": "月销量"},
+            "monthly_revenue": {"value": round(total_rev, 2), "available": True, "label": "月销售额(円)"},
+            "product_cr": {"value": cr_product, "available": total_sales > 0, "label": "商品集中度", "fmt": "cr"},
+            "brand_cr": {"value": cr_brand, "available": total_sales > 0, "label": "品牌集中度", "fmt": "cr"},
+            "seller_cr": {"value": cr_seller, "available": total_sales > 0, "label": "卖家集中度", "fmt": "cr"},
+            "new_sales": {"value": round(new_sales, 2), "available": True, "label": f"新品销量/占比(≤{new_def_months}月)"},
+            "new_sales_share": {"value": pct(new_sales, total_sales), "available": True, "label": "新品销量占比", "fmt": "pct"},
+            "new_revenue": {"value": round(new_rev, 2), "available": True, "label": "新品销售额(円)"},
+            "geo_share": {"value": geo_share, "available": any(geo.values()), "label": "卖家所属地销量占比", "fmt": "bars"},
+            "avg_price": {"value": ms.get("avg_price"), "available": ms.get("avg_price") is not None, "label": "平均价格(円)"},
+            "fulfillment_share": {"value": ful_share, "available": any(ful.values()), "label": "配送方式销量占比", "fmt": "bars"},
+            "a_plus_video": {"value": round(ap_sales / total_sales, 4) if total_sales else None, "available": ap_available, "label": "有A+有视频销量占比", "fmt": "pct", "need": "导出含 A+页面/视频介绍 列"},
+            "return_rate": {"value": None, "available": False, "label": "退货率", "need": "导出含退货率列"},
+            "search_purchase_ratio": {"value": round(pv / sv, 6) if sv else None, "available": sv > 0, "label": "搜索购买比", "fmt": "permille"},
+            "last30_units": {"value": round(total_sales, 2), "available": True, "label": "近30天售出件数(样本)", "note": "等同样本月销量"},
+            "product_features": {"value": None, "available": False, "label": "产品特征分析", "need": "导出含产品特征列"},
+            "avg_listing_days": {"value": round(statistics.mean(ages)) if ages else None, "available": bool(ages), "label": "平均上架天数"},
+            "avg_rating": {"value": round(statistics.mean(ratings), 2) if ratings else None, "available": bool(ratings), "label": "平均评分数"},
+        },
+    }
+
+
 def analyze_market(market, competitors, asin_to_market, keyword_to_market, asin_trends, keyword_trends, keywords, params):
     gaps = []
     comps = []
@@ -509,6 +688,7 @@ def analyze_market(market, competitors, asin_to_market, keyword_to_market, asin_
         item = dict(c)
         item["asin"] = a
         item["title"] = safe_str(c.get("title")) or MISSING
+        item["gender"] = safe_str(c.get("gender")) or MISSING
         item["brand"] = safe_str(c.get("brand")) or MISSING
         item["price"] = num(c.get("price"))
         item["monthly_sales"] = num(c.get("monthly_sales"))
@@ -520,11 +700,19 @@ def analyze_market(market, competitors, asin_to_market, keyword_to_market, asin_
         item["launch_date"] = norm_month(c.get("launch_date"))
         item["seller"] = safe_str(c.get("seller_name")) or MISSING
         item["seller_count"] = num(c.get("seller_count"))
+        item["seller_country"] = safe_str(c.get("seller_country")) or MISSING
+        item["seller_info"] = safe_str(c.get("seller_info")) or MISSING
+        item["fulfillment"] = safe_str(c.get("fulfillment")) or MISSING
+        item["is_china_seller"] = is_china_seller(item)
+        item["a_plus"] = safe_str(c.get("a_plus"))
+        item["video"] = safe_str(c.get("video"))
         item["ad_competition"] = num(c.get("ad_competition"))
         item["return_rate"] = num(c.get("return_rate"))
         item["url"] = asin_url(a)
         if item["monthly_sales"] is not None and item["monthly_sales"] > float(params.get("outlier_sales_max", 5000)):
             gaps.append(f"{market}：ASIN {a} 月销量 {fmt(item['monthly_sales'])} 异常，已排除")
+            continue
+        if not pass_seller_filters(item, params, gaps, market):
             continue
         comps.append(item)
     if not comps:
@@ -622,11 +810,18 @@ def analyze_market(market, competitors, asin_to_market, keyword_to_market, asin_
         if cat and cat != MISSING:
             category_counts[cat] += 1
     main_category = max(category_counts, key=category_counts.get) if category_counts else market
+    # 类目路径可能是一长串（ファッション:メンズ:…:ロングパンツ），取最后一级做展示名
+    if ':' in str(main_category):
+        main_category = str(main_category).split(':')[-1].strip() or market
     source_files = sorted({safe_str(c.get("_source")) for c in comps if c.get("_source")})
+
+    dashboard = build_dashboard(comps, keywords, params, ms, new_def_months=3)
 
     candidate = {
         "market": market,
-        "name": f"{main_category} 精铺机会",
+        # 市场名（小类目）本身已含性别+品类，直接用它做展示名，最简洁且不重复
+        "name": f"{market} 精铺机会",
+        "display_category": main_category,
         "category": main_category,
         "grade": grade_of(total, params),
         "total_score": total,
@@ -634,6 +829,7 @@ def analyze_market(market, competitors, asin_to_market, keyword_to_market, asin_
         "seasonality": season or {"label": "数据不足", "months_available": 0, "cv": None, "months": []},
         "seasonality_label": st_label,
         "market_share": ms,
+        "dashboard": dashboard,
         "suggested_price": suggested_price,
         "profit": profit,
         "net_profit": net,
@@ -642,10 +838,14 @@ def analyze_market(market, competitors, asin_to_market, keyword_to_market, asin_
         "first_order_qty": int(params.get("first_order_qty", 100) or 100),
         "asins": [{
             "asin": c["asin"], "title": c["title"], "brand": c["brand"],
+            "gender": c.get("gender", MISSING),
             "price": c["price"], "monthly_sales": c["monthly_sales"],
             "monthly_revenue": c["monthly_revenue"], "reviews": c["reviews"],
             "rating": c["rating"], "bsr": c["bsr"], "image": c["image"],
             "launch_date": c["launch_date"], "seller": c["seller"], "share": c["share"],
+            "seller_country": c.get("seller_country", MISSING),
+            "fulfillment": c.get("fulfillment", MISSING),
+            "is_china_seller": c.get("is_china_seller"),
             "url": c["url"], "source": c.get("_source", MISSING),
         } for c in comps],
         "data_gaps": gaps,
@@ -665,7 +865,15 @@ def build_report_data(datasets, log, params):
         k = safe_str(r.get("keyword"))
         m = safe_str(r.get("market"))
         if k and m:
-            keyword_to_market[k] = m
+            # 一个关键词可映射多个市场（如 靴下→カーフソックス+スポーツソックス）
+            if k in keyword_to_market:
+                prev = keyword_to_market[k]
+                prev = prev if isinstance(prev, list) else [prev]
+                if m not in prev:
+                    prev.append(m)
+                keyword_to_market[k] = prev
+            else:
+                keyword_to_market[k] = m
     asin_to_market = {}
     for r in competitors_raw:
         a = norm_asin(r.get("asin"))
@@ -734,7 +942,7 @@ HEADERS = {
     "市场规模分析": ["市场", "竞品数", "样本月销量合计", "样本月销售额合计", "平均售价JPY", "中位售价JPY", "中位评论数", "品牌数", "卖家数", "月销30-100竞品数", "低评论竞品数"],
     "市场份额分析": ["市场", "商品CR3", "商品CR5", "商品CR10/TOP10", "商品HHI", "品牌CR3", "品牌CR5", "品牌HHI", "卖家CR3", "卖家CR5", "卖家HHI", "低评论占比", "样本说明"],
     "关键词数据": ["关键词", "市场", "月搜索量", "月购买量", "竞争度", "来源文件"],
-    "竞品ASIN分析": ["市场", "ASIN", "商品标题", "品牌", "卖家", "售价JPY", "月销量", "月销售额JPY", "评论数", "星级", "BSR", "样本份额", "上架月份", "商品链接", "来源文件"],
+    "竞品ASIN分析": ["市场", "ASIN", "商品标题", "性别", "品牌", "卖家", "卖家所属地", "中国卖家", "配送方式", "售价JPY", "月销量", "月销售额JPY", "评论数", "星级", "BSR", "样本份额", "上架月份", "商品链接", "来源文件"],
     "季节性分析": ["市场", "数据来源", "计算窗口", "有效月份数", "月均", "月度CV", "峰谷比", "稳定月数", "判定", "窗口外月份(排除)", "月度明细"],
     "逐月趋势明细": ["市场", "月份", "数值", "数据来源"],
     "价格与利润分析": ["市场", "样本均价JPY", "建议售价JPY", "佣金JPY", "FBA费JPY", "采购JPY", "头程JPY", "广告预留JPY", "退货预留JPY", "其他JPY", "单件净利JPY", "净利率", "目标月销", "预计月净利JPY"],
@@ -795,7 +1003,11 @@ def write_workbook(data, path: Path):
                         for m in [c["market_share"] for c in data["candidates"]]])
     add("关键词数据", [[k["keyword"], k["market"], k["search_volume"], k["purchase_volume"], k["competition"], k["source"]]
                      for k in data["keywords"]])
-    add("竞品ASIN分析", [[c["market"], c["asin"], c["title"], c["brand"], c.get("seller", MISSING),
+    def _cn_label(v):
+        return "是" if v is True else ("否" if v is False else "Unknown")
+    add("竞品ASIN分析", [[c["market"], c["asin"], c["title"], c.get("gender", MISSING), c["brand"], c.get("seller", MISSING),
+                          c.get("seller_country", MISSING), _cn_label(c.get("is_china_seller")),
+                          c.get("fulfillment", MISSING),
                           c["price"], c["monthly_sales"], c["monthly_revenue"], c["reviews"], c["rating"], c["bsr"],
                           c["share"], c["launch_date"], c["url"], c.get("_source", MISSING)] for c in data["competitors"]])
     add("季节性分析", [[c["market"], (c["seasonality"] or {}).get("source", MISSING),

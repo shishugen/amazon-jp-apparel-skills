@@ -72,6 +72,30 @@ HTML = r"""<!DOCTYPE html>
   .spark{width:100%;height:120px;background:#f9fafb;border:1px solid var(--line);border-radius:8px}
   .monthly th,.monthly td{padding:4px 8px;font-size:12px;cursor:default}
   .monthly th{position:sticky;top:0;background:#f9fafb;z-index:1}
+  .pager{display:flex;gap:6px;align-items:center;justify-content:center;margin-top:12px;font-size:12px;color:var(--muted);flex-wrap:wrap}
+  .pager button{border:1px solid var(--line);background:#fff;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;color:var(--ink)}
+  .pager button:hover:not(:disabled){border-color:var(--blue);color:var(--blue)}
+  .pager button:disabled{opacity:.45;cursor:default}
+  .pager button.on{background:var(--blue-soft);border-color:var(--blue);color:var(--blue)}
+  .dash{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;padding:16px 18px}
+  .dcard{background:#fff;border:1px solid var(--line);border-radius:10px;padding:13px 14px;min-height:104px;display:flex;flex-direction:column;justify-content:space-between}
+  .dcard .dk{font-size:12px;color:var(--muted);display:flex;align-items:center;gap:4px}
+  .dcard .dv{font-size:21px;font-weight:700;margin-top:6px;line-height:1.2}
+  .dcard .dv small{font-size:12px;font-weight:500;color:var(--muted)}
+  .dcard .dn{font-size:11px;color:var(--muted);margin-top:4px}
+  .dcard.na{background:#fafafa;color:var(--muted)}
+  .dcard.na .dv{font-size:13px;font-weight:500;color:var(--muted)}
+  .dbars{margin-top:8px}
+  .dbrow{display:flex;align-items:center;gap:6px;font-size:11px;margin-bottom:4px}
+  .dbrow .lbl{width:52px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .dbrow .track{flex:1;background:#eef2f7;border-radius:5px;height:7px;overflow:hidden}
+  .dbrow .fill{height:100%;border-radius:5px;background:var(--blue)}
+  .dbrow .pctv{width:44px;text-align:right;font-weight:600}
+  .dash-hd{padding:12px 18px 0;font-size:12px;color:var(--muted);display:flex;align-items:center;flex-wrap:wrap;gap:6px}
+  .dash-hd strong{color:var(--ink)}
+  .dash-hd .ctrl{display:inline-flex;align-items:center;gap:6px;margin-left:auto}
+  .dash-hd select{border:1px solid var(--line);border-radius:6px;padding:3px 8px;font-size:12px;color:var(--ink);background:#fff;cursor:pointer}
+  .dash-hd select:focus{border-color:var(--blue);outline:none}
 </style>
 </head>
 <body>
@@ -82,6 +106,25 @@ HTML = r"""<!DOCTYPE html>
 </header>
 <div class="wrap">
   <div class="stats" id="stats"></div>
+
+  <div class="card">
+    <div class="card-h">
+      <h2>市场概览看板</h2>
+      <span style="font-size:12px;color:var(--muted)">随下方选中的产品切换 · 全部为样本口径</span>
+    </div>
+    <div class="dash-hd" id="dashHd"></div>
+    <div class="dash-hd" style="padding-top:6px">
+      <span>头部商品</span>
+      <select id="topN" aria-label="头部商品名次">
+        <option value="3">前3名</option>
+        <option value="5">前5名</option>
+        <option value="10" selected>前10名</option>
+        <option value="20">前20名</option>
+      </select>
+      <span style="color:var(--muted)">集中度指标随之切换</span>
+    </div>
+    <div class="dash" id="dash"></div>
+  </div>
 
   <div class="card">
     <div class="card-h"><h2>候选产品</h2><span style="font-size:12px;color:var(--muted)">点行查看 ASIN 与趋势 · 点表头排序</span></div>
@@ -125,7 +168,52 @@ const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt
 const fmt = (v,d=1) => (v===null||v===undefined||v==='缺失') ? '缺失' : (typeof v === 'number' ? v.toLocaleString('zh-CN',{minimumFractionDigits:0,maximumFractionDigits:d}) : esc(v));
 const gradeClass = g => g && g.startsWith('A') ? 'g-a' : (g && g.startsWith('B') ? 'g-b' : (g && g.startsWith('C') ? 'g-c' : 'g-x'));
 
-let state = {grade:'all', minScore:0, maxCv:99, q:'', sort:'total_score', dir:-1, sel:0};
+let state = {grade:'all', minScore:0, maxCv:99, q:'', sort:'total_score', dir:-1, sel:0, asinPage:0, asinAll:false};
+let dashTopN = 10;
+const ASIN_PAGE = 12;
+
+function dashCard(m){
+  if(!m || m.available===false){
+    return `<div class="dcard na"><div class="dk">${esc(m?.label||'指标')}</div><div class="dv">需导出</div><div class="dn">${esc(m?.need||'暂无数据')}</div></div>`;
+  }
+  let v = m.value;
+  let shown, unit='';
+  if(m.fmt==='pct'){ shown = (v===null||v===undefined)?'缺失':(v*100).toFixed(1)+'%'; }
+  else if(m.fmt==='cr'){
+    const cv = v && v['cr'+dashTopN];
+    shown = (cv===null||cv===undefined)?'缺失':(cv*100).toFixed(1)+'%';
+  }
+  else if(m.fmt==='permille'){ shown = (v===null||v===undefined)?'缺失':(v*1000).toFixed(2)+'‰'; }
+  else if(typeof v==='number'){ shown = v.toLocaleString('zh-CN',{maximumFractionDigits:2}); }
+  else shown = esc(v??'缺失');
+  const note = m.note ? `<div class="dn">${esc(m.note)}</div>` : '';
+  return `<div class="dcard"><div class="dk">${esc(m.label)}</div><div class="dv">${shown}${unit}</div>${note}</div>`;
+}
+
+function dashBars(m, colors){
+  const v = m.value||{};
+  const rows = Object.keys(v).map(k=>`<div class="dbrow"><span class="lbl" title="${esc(k)}">${esc(k)}</span><span class="track"><span class="fill" style="width:${Math.min(100,v[k]||0)}%;background:${colors[k]||'var(--blue)'}"></span></span><span class="pctv">${v[k]!=null?v[k].toFixed(1)+'%':'—'}</span></div>`).join('');
+  return `<div class="dcard"><div class="dk">${esc(m.label)}</div><div class="dbars">${rows}</div></div>`;
+}
+
+function renderDashboard(c){
+  const d = c.dashboard;
+  if(!d){ $('#dashHd').textContent=''; $('#dash').innerHTML='<div class="empty" style="padding:20px">该报告由旧版生成，无看板数据。请重跑 analyze.py。</div>'; return; }
+  $('#dashHd').innerHTML = `当前市场：<strong>${esc(c.name)}</strong> · ${esc(d.scope)} · 新品定义 ≤${d.new_definition_months} 个月`;
+  const M = d.metrics;
+  const cards = [
+    dashCard(M.monthly_sales), dashCard(M.monthly_revenue),
+    dashCard(M.product_cr), dashCard(M.brand_cr), dashCard(M.seller_cr),
+    dashCard(M.new_sales), dashCard(M.new_sales_share), dashCard(M.new_revenue),
+    dashBars(M.geo_share, {'中国':'var(--red)','日本':'var(--blue)','其他/未知':'#9ca3af'}),
+    dashCard(M.avg_price),
+    dashBars(M.fulfillment_share, {'AMZ':'var(--amber)','FBA':'var(--green)','FBM':'var(--violet)','未知':'#9ca3af'}),
+    dashCard(M.a_plus_video), dashCard(M.return_rate), dashCard(M.search_purchase_ratio),
+    dashCard(M.last30_units), dashCard(M.product_features),
+    dashCard(M.avg_listing_days), dashCard(M.avg_rating),
+  ];
+  $('#dash').innerHTML = cards.join('');
+}
 
 function rows(){
   let list = D.candidates.map((c,i)=>({...c, rank:i+1, cv:(c.seasonality||{}).cv,
@@ -148,7 +236,9 @@ function rows(){
     if(typeof av==='string') return av.localeCompare(bv)*state.dir;
     return (av-bv)*state.dir;
   });
-  return list;
+  const cap = ((D.params||{}).output||{}).top_n;
+  const n = (cap===undefined||cap===null) ? 9999 : Number(cap);
+  return n>0 ? list.slice(0,n) : list;
 }
 
 function renderTable(){
@@ -162,7 +252,9 @@ function renderTable(){
       <td>¥${fmt(c.avg_price)}</td><td>¥${fmt(c.suggested_price)}</td><td>¥${fmt(c.net_profit)}</td><td>${fmt(c.target_monthly_sales)}</td>
       <td>¥${fmt(c.monthly_net_profit)}</td><td>${fmt(c.cv,2)}</td><td>${fmt(c.product_cr10,2)}</td><td>${fmt(c.brand_cr3,2)}</td><td>${fmt(c.seller_cr3,2)}</td><td>${c.asin_count}</td>
     </tr>`).join('');
-  tb.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>{state.sel=+tr.dataset.i;renderTable();renderDetail();});
+  tb.querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>{
+    state.sel=+tr.dataset.i; state.asinPage=0; state.asinAll=false; renderTable(); renderDetail();
+  });
   const cur = list.find(c=>c.rank-1===state.sel);
   if(cur) renderDetail(cur);
 }
@@ -184,7 +276,8 @@ function spark(c){
 
 function renderDetail(force){
   const c = force || D.candidates[state.sel];
-  if(!c){ $('#detail').innerHTML='<div class="empty">暂无候选产品</div>'; return; }
+  if(!c){ $('#detail').innerHTML='<div class="empty">暂无候选产品</div>'; $('#dash').innerHTML=''; return; }
+  renderDashboard(c);
   $('#detailTitle').textContent = c.name + ' · ' + c.total_score + ' 分';
   $('#detailSub').textContent = c.grade + ' · ' + c.market;
   const sea=c.seasonality||{}, ms=c.market_share;
@@ -224,19 +317,51 @@ function renderDetail(force){
     </div>
     <div class="sec">
       <h3>竞品 ASIN（${c.asins.length} 个，点 ASIN 打开 Amazon.co.jp）</h3>
-      <div class="asins">${c.asins.slice(0,12).map(a=>`
-        <div class="asin">
-          ${a.image?`<img src="${esc(a.image)}" alt="" onerror="this.style.display='none'">`:'<div class="noimg">无图</div>'}
-          <div class="meta">
-            <a class="code" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.asin)}</a>
-            <div class="title" title="${esc(a.title)}">${esc(a.title)}</div>
-            <div class="nums">¥${fmt(a.price)} · 月销 ${fmt(a.monthly_sales)} · 评论 ${fmt(a.reviews)} · 份额 ${fmt(a.share,2)}</div>
-            <div style="font-size:11px;color:var(--muted)">${esc(a.brand)} · 来源 ${esc(a.source)}</div>
-          </div>
-        </div>`).join('')}</div>
-      ${c.asins.length>12?`<div style="font-size:12px;color:var(--muted);margin-top:8px">仅显示前 12 个，完整列表见 Excel。</div>`:''}
+      <div class="asins" id="asinList"></div>
+      <div class="pager" id="asinPager"></div>
     </div>`;
   $('#detailGaps').textContent = c.data_gaps && c.data_gaps.length ? '数据缺口：'+c.data_gaps.join('；') : '数据缺口：无';
+  renderAsins(c);
+}
+
+function renderAsins(c){
+  const all = c.asins || [];
+  const box = $('#asinList'), pg = $('#asinPager');
+  if(!all.length){ box.innerHTML='<div class="empty" style="padding:20px">无竞品 ASIN</div>'; pg.innerHTML=''; return; }
+  const totalPages = Math.max(1, Math.ceil(all.length / ASIN_PAGE));
+  if(!state.asinAll && state.asinPage >= totalPages) state.asinPage = totalPages - 1;
+  const view = state.asinAll ? all : all.slice(state.asinPage*ASIN_PAGE, (state.asinPage+1)*ASIN_PAGE);
+  box.innerHTML = view.map(a=>`
+    <div class="asin">
+      ${a.image?`<img src="${esc(a.image)}" alt="" onerror="this.style.display='none'">`:'<div class="noimg">无图</div>'}
+      <div class="meta">
+        <a class="code" href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.asin)}</a>
+        <div class="title" title="${esc(a.title)}">${esc(a.title)}</div>
+        <div class="nums">¥${fmt(a.price)} · 月销 ${fmt(a.monthly_sales)} · 评论 ${fmt(a.reviews)} · 份额 ${fmt(a.share,2)}</div>
+        <div style="font-size:11px;color:var(--muted)">${esc(a.brand)}${a.gender&&a.gender!=='缺失'?' · '+esc(a.gender):''} · ${esc(a.fulfillment||'配送未知')} · ${a.is_china_seller===true?'中国卖家':(a.is_china_seller===false?'非中国卖家':'卖家地未知')}${a.seller_country&&a.seller_country!=='缺失'?'('+esc(a.seller_country)+')':''}</div>
+        <div style="font-size:11px;color:var(--muted)">来源 ${esc(a.source)}</div>
+      </div>
+    </div>`).join('');
+  if(state.asinAll){
+    pg.innerHTML = `<span>显示全部 ${all.length} 个</span><button data-asin-act="page">每页 ${ASIN_PAGE} 个</button>`;
+  } else {
+    pg.innerHTML = `<button data-asin-act="first" ${state.asinPage===0?'disabled':''}>首页</button>`
+      + `<button data-asin-act="prev" ${state.asinPage===0?'disabled':''}>上一页</button>`
+      + `<span>第 ${state.asinPage+1} / ${totalPages} 页 · ${state.asinPage*ASIN_PAGE+1}–${Math.min(all.length,(state.asinPage+1)*ASIN_PAGE)} 个（共 ${all.length} 个）</span>`
+      + `<button data-asin-act="next" ${state.asinPage>=totalPages-1?'disabled':''}>下一页</button>`
+      + `<button data-asin-act="last" ${state.asinPage>=totalPages-1?'disabled':''}>末页</button>`
+      + `<button data-asin-act="all">显示全部 ${all.length} 个</button>`;
+  }
+  pg.querySelectorAll('button[data-asin-act]').forEach(b=>b.onclick=()=>{
+    const act=b.dataset.asinAct;
+    if(act==='all'){ state.asinAll=true; }
+    else if(act==='page'){ state.asinAll=false; state.asinPage=0; }
+    else if(act==='first'){ state.asinPage=0; }
+    else if(act==='prev'){ state.asinPage=Math.max(0,state.asinPage-1); }
+    else if(act==='next'){ state.asinPage=Math.min(totalPages-1,state.asinPage+1); }
+    else if(act==='last'){ state.asinPage=totalPages-1; }
+    renderAsins(c);
+  });
 }
 
 function init(){
@@ -254,10 +379,12 @@ function init(){
   ];
   $('#stats').innerHTML=stats.map(x=>`<div class="stat"><div class="k">${esc(x[0])}</div><div class="v">${esc(x[1])} <small>${esc(x[2])}</small></div></div>`).join('');
 
-  $('#fGrade').onchange=e=>{state.grade=e.target.value;state.sel=0;renderTable();};
-  $('#fScore').onchange=e=>{state.minScore=+e.target.value;state.sel=0;renderTable();};
-  $('#fCv').onchange=e=>{state.maxCv=+e.target.value;state.sel=0;renderTable();};
-  $('#fQ').oninput=e=>{state.q=e.target.value;state.sel=0;renderTable();};
+  const resetPage=()=>{state.sel=0;state.asinPage=0;state.asinAll=false;};
+  $('#topN').onchange=e=>{dashTopN=+e.target.value;if(D.candidates[state.sel])renderDashboard(D.candidates[state.sel]);};
+  $('#fGrade').onchange=e=>{state.grade=e.target.value;resetPage();renderTable();};
+  $('#fScore').onchange=e=>{state.minScore=+e.target.value;resetPage();renderTable();};
+  $('#fCv').onchange=e=>{state.maxCv=+e.target.value;resetPage();renderTable();};
+  $('#fQ').oninput=e=>{state.q=e.target.value;resetPage();renderTable();};
   $('#fSort').onchange=e=>{state.sort=e.target.value;state.dir=['cv','reviews','product_cr10','brand_cr3','seller_cr3'].includes(e.target.value)?1:-1;renderTable();};
   document.querySelectorAll('th[data-k]').forEach(th=>th.onclick=()=>{
     const k=th.dataset.k;

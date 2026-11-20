@@ -1,5 +1,16 @@
 # 卖家精灵数据采集指南
 
+## 看板所需列（prep_competitor.py 已保留）
+
+原始「选产品」导出 66 列，`prep_competitor.py` 的 COLMAP 会保留以下列供市场概览看板使用，缺了看板对应卡片会显示"需导出"：
+- `配送方式`（AMZ/FBA/FBM）→ 配送方式分布
+- `卖家所属地` + `卖家信息` → 卖家所属地分布、中国卖家判断
+- `A+页面` / `视频介绍` → 有A+有视频销量占比
+- `上架时间` → 新品占比、平均上架天数
+
+仍无对应导出列、看板固定标"需导出"的：`退货率`、`产品特征分析`。
+旧 raw 若没有这几列，重跑 `prep_competitor.py` 即可从 `raw-products/product_export_*.xlsx` 重新生成。
+
 ## 站点与登录
 
 - 用 `https://www.sellersprite.com`（国际站）。`sellersprite.cn` 在本机 SSL 握手失败。
@@ -10,7 +21,8 @@
 agent-browser open "https://www.sellersprite.com" --headed
 ```
 
-登录态只在同一次浏览器会话内有效。采完再 `agent-browser close`。
+采集完成后**不要 `agent-browser close`**，保留浏览器和登录态给下一次对话复用（省掉重复登录）。只有用户明确要求关闭时才关。
+下一次对话开始前先 `agent-browser eval "location.href"` 探测：返回 `/v2/welcome` / `/v2/me` / `/v3/...` 说明登录态还在，直接复用；返回登录页 / `about:blank` / 命令报错（daemon 已退出）就重新 `open --headed` 登录。daemon 被系统清理属正常，重新登录即可。
 
 本机如出现 `ERR_TUNNEL_CONNECTION_FAILED` / 502，读系统代理覆盖环境变量：
 

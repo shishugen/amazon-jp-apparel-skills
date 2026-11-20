@@ -20,6 +20,9 @@
   "history_months": 24,
   "min_months_for_seasonality": 6,
   "low_review_max": 50,
+  "new_product_months": 0,
+  "seller_country": "all",
+  "fulfillment": "all",
   "outlier_sales_max": 5000,
   "costs": {
     "purchase_cost_jpy": 700,
